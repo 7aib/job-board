@@ -204,6 +204,66 @@ def update_job(job_id: int, job_update: JobUpdate, db: Session = Depends(get_db)
     
     return job
 
+# ---------------------------------------------------------
+# Feature 6: Close a Job
+# ---------------------------------------------------------
+
+
+@app.put("/api/jobs/{job_id}/close")
+def close_job(job_id: int, db: Session = Depends(get_db)):
+    """Manually close a job listing.
+
+    When a job is closed:
+    - New applications are rejected by existing checks in `apply_to_job`.
+    - Existing `pending` applications are auto-rejected and a status-history
+      entry is created for each auto-rejection.
+    """
+
+    # Verify job exists
+    job = db.query(Job).filter(
+        and_(Job.id == job_id, Job.is_deleted == False)
+    ).first()
+    
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job not found"
+        )
+
+    # Idempotent: if already closed, return a message
+    if job.is_closed:
+        return {"message": "Job is already closed"}
+
+    # Close the job
+    job.is_closed = True
+    job.updated_at = datetime.utcnow()
+
+    # Auto-reject any existing pending applications for this job
+    pending_apps = db.query(Application).filter(
+        and_(
+            Application.job_id == job_id,
+            Application.status == ApplicationStatusEnum.pending,
+            Application.is_deleted == False
+        )
+    ).all()
+
+    for app_obj in pending_apps:
+        previous = app_obj.status
+        app_obj.status = ApplicationStatusEnum.rejected
+        app_obj.updated_at = datetime.utcnow()
+
+        history = ApplicationStatusHistory(
+            application_id=app_obj.id,
+            previous_status=previous,
+            new_status=ApplicationStatusEnum.rejected,
+            note="Job closed by hiring manager - application auto-rejected"
+        )
+        db.add(history)
+
+    db.commit()
+
+    return {"message": "Job closed successfully", "auto_rejected": len(pending_apps)}
+
 
 # ---------------------------------------------------------
 # Feature 3: Apply to a Job
